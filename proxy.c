@@ -1,29 +1,3 @@
-
-/* CS:APP Web proxy
- *
- * TEAM MEMBERS: 
- *     Chris Lott, cnlo223@uky.edu 
- *     Michael Denny, msdenn3@g.uky.edu 
- 
- 	Caching (both dns and page) are done using linked lists of structs.
-
-	This program opens up a socket on port 15213 and waits for connections.
-
-	When it recieves a connection, it does 5 things in this order:
-		1.)Get request from client
-		2.)Parse request, checking for correct format as well as extracting information
-		3.)Check page cache
-		4.)If not in page cache, check dns cache
-		5.)Fork a child to handle getting page from server (if nessecary) and
-			to handle sending the webpage back to the client
-
-	Web cache files are simply numbered. The relation between hostname/pathname and filename is
-		tracked using a linked list (of webPageCache structs)
- 
- 
- */ 
-
-
 #include "csapp.h"
 #include "stdio.h"
 #include "netdb.h"
@@ -41,7 +15,7 @@
  */
 int handleRequest(int server_fd); //get resource from server, save to file
 int parse_uri(char *uri, char *target_addr, int  *port); //parse uri
-
+void error(int client_fd);
 
 int host_not_found = 0;
 
@@ -54,14 +28,25 @@ char method[BUFSIZE];
 char hostname[BUFSIZE];
 int client_fd, server_fd;
 size_t n;
+char log_string[BUFSIZE];
+char* error_str = "HTTP/1.1 500 Internal Server Error";
 
+
+void error(int client_fd)
+{
+	Rio_writen(client_fd, error_str, strlen(error_str));
+	Rio_writen(client_fd, "\r\n\r\n", 4);
+	close(client_fd);
+	printf("%s", log_string);
+	exit(0);
+}
 
 int main(int argc, char **argv)
 {
         int listen_fd, clientlen;
         struct sockaddr_in clientaddr;
 
-	port = 8080; //hardcoded port
+	port = 12345; //hardcoded port
 
 	listen_fd = Open_listenfd(port);   //open listening descriptor
 	int x;
@@ -73,64 +58,101 @@ int main(int argc, char **argv)
                 client_fd = Accept(listen_fd, (SA *)&clientaddr, (socklen_t *) &clientlen);
               	if (fork() == 0)
 		{
+		    	strcat(log_string, "conn: ");
 			close(listen_fd); //in child process
-			
 			bzero(buf, sizeof(char) * BUFSIZE);
 			x = recv(client_fd, buf, sizeof(char) * BUFSIZE, 0);
-
+			
 			if (x < 0)
 			{
-				close(client_fd);
-				exit(0);
+				strcat(log_string, "fail 1\n");
+				error(client_fd);
 			}
-
+			//printf("%s", buf);
 			sscanf(buf, "%s %s %s", method, uri, version);  //scan input from client and extract method, uri, and version
-
+			strcat(log_string, "Method - ");
+			strcat(log_string, method);
+			strcat(log_string, ": ");
 			// proxy can only accepts GET method
-	                if (strcmp(method, "GET") != 0)
+	        		
+			    int parse_rtn = parse_uri(uri, hostname, &port);  //call parse_uri to extract host name, path name, and port
+			    if (parse_rtn < 0 || hostname == NULL) //check for parse errors
+			    {
+				    strcat(log_string, "parse uri error\n\"");
+				    strcat(log_string, buf); strcat(log_string, "\"");
+				    error(client_fd);
+			    }
+	    
+		        if (strcmp(method, "CONNECT") == 0)
         	        {
-//              	        printf("Invalid Method:%s\n",method);
-				close(client_fd);
-				exit(0); //child
-                	}
-		
-			else //GET request
-			{
-	        	        int parse_rtn = parse_uri(uri, hostname, &port);  //call parse_uri to extract host name, path name, and port
-				if (parse_rtn < 0 || hostname == NULL) //check for parse errors
+			        //printf("hostname: %s\nport: %d\n", hostname, port);
+				if ((server_fd = Open_clientfd(hostname, port)) < 0)
 				{
-					printf("error\n");
-					close(client_fd);
-					exit(0); //child
+					strcat(log_string, "bad connection to server\n");
+					close(server_fd);
+					error(client_fd);
 				}
-		
-				//if we can resolve the host name, attempt to connect to the server
-				else if ((server_fd = Open_clientfd(hostname, port)) < 0)
+				
+				char message[1]; //buffer for server response
+				size_t x;
+				//Rio_writen(server_fd, buf, strlen(buf));
+				//Rio_writen(server_fd, "\r\n\r\n", 4);
+				char* http200 = "HTTP/1.1 200 Connection Established\r\nProxy-agent: DennyProxy1.0\r\n\r\n";
+				Rio_writen(client_fd, http200, strlen(http200));
+				strcat(log_string, "Staring SSL proxy...\n");
+				printf("%s", log_string);
+				//fork for client--> server
+				if(fork() == 0)
 				{
-					host_not_found = 1;
-                       	    		printf("bad connection to server. serverfd:%d\n", server_fd);
-					close(client_fd);
-					exit(0); //child
-         		    	}
-				//if we get here, we have a connection to the server
-				//  now we just need to get the resource
-		    		else
-				{
-//					printf("pre handleReq\n");
-					//handeRequest forward request to server and saves the response
-                     			if (handleRequest(server_fd) < 0)
-					{
-	                       			host_not_found = 1;
-						printf("Error Handling Request");
-	                	        }
-//						printf("post handleReq\n");
-        				    
-					Close(server_fd); //finished with the server
-					Close(client_fd); //finished with this connection
-					exit(0); //finished with everything (for this child)
-				}
+				    while ( (x = Rio_readn(client_fd, message, sizeof(char))) > 0)
+				    {
+					    Rio_writen(server_fd, message, x);
+				    }
+				    //printf("done");
+				    close(client_fd);
+				    close(server_fd);
+				    exit(0);
 
+				}
+				else //server --> client
+				{
+				    while ( (x = Rio_readn(server_fd, message, sizeof(char))) > 0)
+				    {
+					    Rio_writen(client_fd, message, x);
+				    }
+				    close(client_fd);
+				    close(server_fd);
+				    exit(0);
+				}
 			}
+	    //if we can resolve the host name, attempt to connect to the server
+			    else if ((server_fd = Open_clientfd(hostname, port)) < 0)
+			    {
+				    strcat(log_string, "bad connection to server\n");
+				    close(server_fd);
+				    error(client_fd);
+			    } 
+			    //if we get here, we have a connection to the server
+			    //  now we just need to get the resource
+			    else
+			    {
+//					printf("pre handleReq\n");
+				    //handeRequest forward request to server and saves the response
+				    if (handleRequest(server_fd) < 0)
+				    {
+					    strcat(log_string, "Error in Handling Request\n");
+					    close(server_fd);
+					    error(client_fd);
+				    }
+//						printf("post handleReq\n");
+					
+				    Close(server_fd); //finished with the server
+				    Close(client_fd); //finished with this connection
+				    strcat(log_string, "Success!\n");
+				    printf("%s", log_string);
+				    exit(0); //finished with everything (for this child)
+			    }
+
 		}
 		else//parent
 		{
@@ -161,13 +183,16 @@ int parse_uri(char *uri, char *hostname, int *port)
 
     memset(hostname, 0, sizeof(hostname));
     //pathname[0] = NULL;
-    if (strncasecmp(uri, "http://", 7) != 0) {
-        hostname[0] = '\0';
-        return -1;
+    if (strncasecmp(uri, "http://", 7) == 0) {
+        hostbegin = uri + 7;
     }
+    else if (strncasecmp(uri, "https://", 8) == 0) {
+	hostbegin = uri + 8;
+    }
+    else
+	hostbegin = uri;
        
     /* Extract the host name */
-    hostbegin = uri + 7;
     hostend = strpbrk(hostbegin, " :/\r\n\0");
     if (hostend == NULL)
 	    return -1;
