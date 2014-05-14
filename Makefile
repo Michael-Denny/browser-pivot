@@ -1,7 +1,7 @@
 all: proxy
 
 proxy: proxy.o
-	g++ proxy.o -o proxy -lpthread
+	g++ proxy.o -o proxy
 
 proxy.o: proxy.cpp
 	g++ -Wall -g -c proxy.cpp
